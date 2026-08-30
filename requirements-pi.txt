@@ -1,0 +1,8 @@
+# Pi Zero 2 W only. Deliberately excludes pygame (no window on the robot) and
+# opencv (huge, slow to install on 512 MB, and picamera2 replaces it).
+# picamera2 comes from apt, not pip — see pi/setup.sh.
+openai>=1.99
+sounddevice>=0.4.6
+numpy>=1.24
+python-dotenv>=1.0
+pillow>=10.0

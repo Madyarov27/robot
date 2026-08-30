@@ -1,0 +1,19 @@
+[Unit]
+Description=Rolling robot voice loop
+# Do not start before the network is genuinely usable — every turn needs the API.
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__REPO__/.venv/bin/python -m robot.loop
+Restart=on-failure
+RestartSec=5
+# A robot with no keyboard must survive transient Wi-Fi and API failures.
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
