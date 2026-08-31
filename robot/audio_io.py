@@ -132,6 +132,15 @@ class Speaker:
     its mouth in step with the actual waveform instead of faking it on a timer.
     """
 
+    # First-chunk-of-a-sentence stutter happens when the output stream starts
+    # with almost no cushion: PortAudio's default (low-latency) buffer is
+    # small, and the first TTS chunk (~43ms) has to land exactly on time or
+    # the driver underruns and clicks. A Pi under load — or, as here, a
+    # marginal power supply adding CPU-timing jitter — makes that miss more
+    # likely. Fix: ask for a bigger buffer, and don't open the stream until a
+    # small cushion of real audio is queued up.
+    PRIME_MS = 120
+
     def __init__(self, on_level=None) -> None:
         self._on_level = on_level
         self._stream = sd.RawOutputStream(
@@ -139,25 +148,46 @@ class Speaker:
             channels=1,
             dtype="int16",
             device=config.OUTPUT_DEVICE,
+            latency="high",
         )
         self._tail = b""
+        self._prime_buf = bytearray()
+        self._prime_bytes = int(config.TTS_SAMPLERATE * self.PRIME_MS / 1000) * 2
+        self._started = False
 
     def __enter__(self) -> "Speaker":
-        self._stream.start()
         return self
 
     def __exit__(self, *exc) -> None:
+        if not self._started and self._prime_buf:
+            # Short reply never reached the prime threshold — play what we have.
+            self._start(bytes(self._prime_buf))
+            self._prime_buf.clear()
         # Flush any odd trailing byte's partner, then let the buffer drain.
-        if self._stream.active:
+        if self._started and self._stream.active:
             silence = b"\x00" * (2 * int(config.TTS_SAMPLERATE * 0.05))
             try:
                 self._stream.write(silence)
             except sd.PortAudioError:
                 pass
-        self._stream.stop()
-        self._stream.close()
+        if self._started:
+            self._stream.stop()
+            self._stream.close()
         if self._on_level:
             self._on_level(0.0)
+
+    def _start(self, payload: bytes) -> None:
+        self._stream.start()
+        self._started = True
+        self._emit_level(payload)
+        self._stream.write(payload)
+
+    def _emit_level(self, payload: bytes) -> None:
+        if not self._on_level or not payload:
+            return
+        samples = np.frombuffer(payload, dtype=np.int16)
+        # Compress the range: speech RMS sits low, but the mouth should open wide.
+        self._on_level(min(1.0, (_rms(samples) / 9000.0) ** 0.65))
 
     def write(self, chunk: bytes) -> None:
         """Chunks arrive on arbitrary byte boundaries; frames must stay aligned."""
@@ -167,10 +197,16 @@ class Speaker:
         if not usable:
             return
         payload = data[:usable]
-        if self._on_level:
-            samples = np.frombuffer(payload, dtype=np.int16)
-            # Compress the range: speech RMS sits low, but the mouth should open wide.
-            self._on_level(min(1.0, (_rms(samples) / 9000.0) ** 0.65))
+
+        if not self._started:
+            self._prime_buf.extend(payload)
+            if len(self._prime_buf) < self._prime_bytes:
+                return  # still building the cushion; nothing played yet
+            self._start(bytes(self._prime_buf))
+            self._prime_buf.clear()
+            return
+
+        self._emit_level(payload)
         self._stream.write(payload)
 
 
